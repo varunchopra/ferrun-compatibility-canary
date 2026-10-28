@@ -1,0 +1,20 @@
+# Copyright (c) 2026 Ferrun contributors. All rights reserved.
+#
+# Responsibility: Verify composite defaults and explicit working directories.
+# Connections: semantics.yml uses this local action to compare workspace resolution on
+# Ferrun and the official runner.
+
+name: Directory scope probe # Exercise embedded defaults with the same source on both runner implementations.
+description: Verify workspace and explicit composite directories # State the behavior established by successful child assertions.
+runs: # Use the actual composite metadata contract.
+  using: composite # Caller script defaults must not enter this action's child scope.
+  steps: # Both choices must succeed before the parent action can pass.
+    - id: workspace # Give marker and expression attribution a stable child context.
+      name: Embedded workspace # Identify the omitted-directory assertion in both logs.
+      shell: bash # Composite children declare their own interpreter.
+      run: test "$PWD" -ef "$GITHUB_WORKSPACE" # Require the same actual workspace directory across native Windows and POSIX spellings despite the caller's default.
+    - id: explicit # Keep the override independently attributable.
+      name: Embedded explicit directory # Prevent an overcorrection that ignores all child directories.
+      shell: bash # Keep interpreter choice separate from directory selection.
+      working-directory: project # Apply an explicit action-owned working directory.
+      run: test "$PWD" -ef "$GITHUB_WORKSPACE/project" # Preserve the explicit embedded-directory assertion without confusing Git Bash spelling with directory identity.

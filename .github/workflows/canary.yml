@@ -1,0 +1,163 @@
+# Copyright (c) 2026 Ferrun contributors. All rights reserved.
+#
+# Responsibility: Exercise runner reuse, job renewal, terminal outcomes, and
+# cancellation.
+# Connections: live-canary.py dispatches these jobs on Ferrun and reference runners
+# and compares canary_profile.py observations.
+
+# Exercise job results, runner reuse, renewal and cancellation.
+name: API compatibility canary
+run-name: api-probe-${{ inputs.probe_id }}
+on:
+  workflow_dispatch:
+    inputs:
+      # Manual probes stay self-hosted; release qualification opts into hosted references.
+      allow_hosted:
+        type: boolean
+        default: false
+        required: false
+      case:
+        type: choice
+        options:
+          [success, failure, job_output_failure, renewal, cancellation, capacity, build]
+        default: success
+        required: true
+      pool_label:
+        type: string
+        default: api-control-plane-canary
+        required: true
+      probe_id:
+        type: string
+        default: manual
+        required: true
+      capacity_gate:
+        type: string
+        default: ''
+        required: false
+permissions:
+  contents: read
+defaults:
+  run:
+    shell: bash
+jobs:
+  capacity:
+    if: inputs.case == 'capacity'
+    name: Capacity ${{ matrix.slot }}
+    strategy:
+      fail-fast: false
+      matrix:
+        slot: [1, 2, 3]
+    runs-on: ${{ fromJSON(format('["self-hosted","{0}"]', inputs.pool_label)) }}
+    timeout-minutes: 2
+    steps:
+      - name: Hold the reserved slot until the observer releases it
+        env:
+          CAPACITY_GATE: ${{ inputs.capacity_gate }}
+          CAPACITY_SLOT: ${{ matrix.slot }}
+        run: |
+          node <<'JS'
+          const fs = require('node:fs');
+          const path = require('node:path');
+          const directory = process.env.CAPACITY_GATE;
+          const slot = process.env.CAPACITY_SLOT;
+          const release = path.join(directory, `${slot}.release`);
+          if (!fs.statSync(directory).isDirectory()) throw new Error('Gate directory is missing');
+          const watcher = fs.watch(directory, () => {
+            if (fs.existsSync(release)) watcher.close();
+          });
+          fs.writeFileSync(path.join(directory, `${slot}.ready`), 'ready\n', { flag: 'wx' });
+          if (fs.existsSync(release)) watcher.close();
+          JS
+  success:
+    if: inputs.case == 'success'
+    runs-on: ${{ inputs.allow_hosted && inputs.pool_label || fromJSON(format('["self-hosted","{0}"]', inputs.pool_label)) }}
+    steps:
+      - name: Fresh run marker
+        run: printf 'API-CANARY-SUCCESS %s\n' "$GITHUB_RUN_ID"
+  failure:
+    if: inputs.case == 'failure'
+    runs-on: ${{ inputs.allow_hosted && inputs.pool_label || fromJSON(format('["self-hosted","{0}"]', inputs.pool_label)) }}
+    steps:
+      - name: Expected failure
+        run: |
+          printf 'API-CANARY-FAILURE %s\n' "$GITHUB_RUN_ID"
+          exit 7
+  # A successful step can still produce a job finalization failure.
+  job_output_failure:
+    if: inputs.case == 'job_output_failure'
+    runs-on: ${{ inputs.allow_hosted && inputs.pool_label || fromJSON(format('["self-hosted","{0}"]', inputs.pool_label)) }}
+    timeout-minutes: 2
+    outputs:
+      broken: ${{ fromJSON(steps.payload.outputs.invalid) }}
+    steps:
+      - name: Produce invalid job output
+        id: payload
+        run: |
+          printf 'invalid=not-json\n' >> "$GITHUB_OUTPUT"
+          printf 'API-OUTPUT-FAILURE-READY %s\n' "$GITHUB_RUN_ID"
+  # The dependent job proves completion was reported and runner capacity was released.
+  output_failure_consumer:
+    if: always() && inputs.case == 'job_output_failure'
+    needs: job_output_failure
+    runs-on: ${{ inputs.allow_hosted && inputs.pool_label || fromJSON(format('["self-hosted","{0}"]', inputs.pool_label)) }}
+    steps:
+      - name: Verify failed finalization
+        env:
+          PREVIOUS_RESULT: ${{ needs.job_output_failure.result }}
+        run: |
+          test "$PREVIOUS_RESULT" = failure
+          printf 'API-OUTPUT-FAILURE-CONSUMER-PASS %s\n' "$GITHUB_RUN_ID"
+  renewal:
+    if: inputs.case == 'renewal'
+    runs-on: ${{ inputs.allow_hosted && inputs.pool_label || fromJSON(format('["self-hosted","{0}"]', inputs.pool_label)) }}
+    steps:
+      - name: Renew during execution
+        run: |
+          printf 'API-CANARY-START %s\n' "$GITHUB_RUN_ID"
+          # The observer requires at least 90 seconds of actual job execution.
+          sleep 95
+          printf 'API-CANARY-RENEWED %s\n' "$GITHUB_RUN_ID"
+  cancellation:
+    if: inputs.case == 'cancellation'
+    runs-on: ${{ inputs.allow_hosted && inputs.pool_label || fromJSON(format('["self-hosted","{0}"]', inputs.pool_label)) }}
+    steps:
+      - name: Cancel running command
+        run: |
+          printf 'API-CANARY-CANCEL-START %s\n' "$GITHUB_RUN_ID"
+          sleep 300
+          printf 'SHOULD-NOT-EXECUTE %s\n' "$GITHUB_RUN_ID"
+      - name: Cleanup after cancellation
+        if: always()
+        run: sleep 1; printf 'API-CANCEL-CLEANUP-PASS %s\n' "$GITHUB_RUN_ID"
+      - name: Verify cancellation state
+        if: cancelled()
+        run: printf 'API-CANCEL-CONTEXT-PASS %s\n' "$GITHUB_RUN_ID"
+  # This optional build demonstration uses the development Mac and is outside release qualification.
+  build:
+    if: inputs.case == 'build'
+    runs-on: ${{ inputs.allow_hosted && inputs.pool_label || fromJSON(format('["self-hosted","{0}"]', inputs.pool_label)) }}
+    steps:
+      - name: Build and test the control plane
+        shell: bash
+        run: |
+          set -euo pipefail
+          uname -sm
+          printf 'macOS %s\n' "$(sw_vers -productVersion)"
+          project_root=/Users/varun/workspace/actions-runner
+          cd "$project_root"
+          build_log=$(mktemp)
+          trap 'rm -f "$build_log"' EXIT
+          export CARGO_HOME=/Users/varun/.cargo
+          export RUSTUP_HOME=/Users/varun/.rustup
+          export PATH="$CARGO_HOME/bin:$PATH"
+          export RUSTUP_TOOLCHAIN=1.98.1
+          export CARGO_TARGET_DIR="$project_root/target"
+          export PYTHONDONTWRITEBYTECODE=1
+          rustc --version | python3 -c 'import sys; v=sys.stdin.read().strip(); print(v); assert v.startswith("rustc 1.98.1 ")'
+          cargo test --workspace --locked --offline > "$build_log" 2>&1 || { tail -n 40 "$build_log"; exit 1; }
+          printf 'Rust workspace tests passed\n'
+          cargo build --release --locked --offline -p control-plane -p executor > "$build_log" 2>&1 || { tail -n 40 "$build_log"; exit 1; }
+          printf 'Release build passed\n'
+          "$CARGO_TARGET_DIR/release/control-plane" --openapi > "$build_log"
+          python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert "/api/v2/connections" in d["paths"] and "/api/v2/executors/enroll" in d["paths"]; assert "/acquirejob" not in d["paths"]; print("Consumer API verified:", len(d["paths"]), "routes")' "$build_log"
+          printf 'PROJECT-BUILD-PASS %s\n' "$GITHUB_RUN_ID"

@@ -1,0 +1,190 @@
+# Copyright (c) 2026 Ferrun contributors. All rights reserved.
+#
+# Responsibility: Exercise common actions, file commands, outputs, artifacts, and
+# caches.
+# Connections: Live qualification dispatches this workflow and compares complete
+# reporting through reporting_contract.py.
+
+# Test real actions, file commands, outputs, artifacts and caches.
+name: Standard action compatibility
+run-name: api-probe-${{ inputs.probe_id }}
+on:
+  workflow_dispatch:
+    inputs:
+      # Manual probes stay self-hosted; release qualification opts into hosted references.
+      allow_hosted:
+        type: boolean
+        default: false
+        required: false
+      pool_label:
+        type: string
+        required: true
+      probe_id:
+        type: string
+        required: true
+permissions:
+  contents: read
+  actions: read
+defaults:
+  run:
+    shell: bash
+jobs:
+  standard:
+    runs-on: ${{ inputs.allow_hosted && inputs.pool_label || fromJSON(format('["self-hosted","{0}"]', inputs.pool_label)) }}
+    timeout-minutes: 10
+    outputs:
+      payload: ${{ steps.values.outputs.payload }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      # Unnamed actions must receive the same timeline names on both runners.
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: '24.14.0'
+          package-manager-cache: false
+      - name: Create outputs and environment
+        id: values
+        shell: bash
+        run: |
+          printf 'payload=standard-%s\n' "$GITHUB_RUN_ID" >> "$GITHUB_OUTPUT"
+          printf 'STANDARD_ENV=propagated\nMULTILINE<<END_STANDARD\nfirst\nsecond\nEND_STANDARD\n' >> "$GITHUB_ENV"
+          mkdir -p standard-fixture/cache
+          node -e 'if (process.versions.node !== "24.14.0") process.exit(1)'
+      - id: composite
+        uses: ./.github/actions/context-probe
+        env:
+          COMPOSITE_ENV: inherited
+        with:
+          value: ${{ steps.values.outputs.payload }}
+      - name: Probe reporting commands
+        id: reporting
+        uses: ./.github/actions/reporting-probe
+      - name: Expected continued failure
+        id: allowed_failure
+        continue-on-error: true
+        run: exit 7
+      - name: Verify runtime contexts
+        id: script
+        if: steps.allowed_failure.outcome == 'failure' && steps.allowed_failure.conclusion == 'success'
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3
+        env:
+          EXPECTED: ${{ steps.composite.outputs.echoed }}
+        with:
+          script: |
+            const assert = require('node:assert/strict');
+            assert.equal(process.env.EXPECTED, 'standard-' + context.runId);
+            assert.equal(process.env.STANDARD_ENV, 'propagated');
+            assert.equal(process.env.MULTILINE, 'first\nsecond');
+            const response = await github.rest.repos.get(context.repo);
+            assert.equal(response.data.full_name, process.env.GITHUB_REPOSITORY);
+            core.setOutput('checked', 'yes');
+            await core.summary.addHeading('Standard action compatibility').addRaw('Real actions executed successfully.').write();
+      # The generated name must contain only the first line of this command.
+      - working-directory: standard-fixture
+        env:
+          PAYLOAD: ${{ steps.values.outputs.payload }}
+          CHECKED: ${{ steps.script.outputs.checked }}
+        run: |
+          test "$CHECKED" = yes
+          printf '%s\n' "$PAYLOAD" > payload.txt
+          printf '%s\n' "$PAYLOAD" > cache/value.txt
+      - name: Upload artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: standard-${{ github.run_id }}
+          path: standard-fixture/payload.txt
+          if-no-files-found: error
+          retention-days: 1
+
+      # Uploads can finish before the REST index lists them; wait before downloading.
+      - name: Wait for artifact index
+        env:
+          ARTIFACT_TOKEN: ${{ github.token }}
+        run: |
+          node --input-type=module <<'JS'
+
+          const url = `${process.env.GITHUB_API_URL}/repos/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}/artifacts`;
+          const name = `standard-${process.env.GITHUB_RUN_ID}`;
+          for (let attempt = 0; attempt < 30; attempt++) {
+            const response = await fetch(url, {headers: {Authorization: `Bearer ${process.env.ARTIFACT_TOKEN}`, Accept: 'application/vnd.github+json'}});
+            if (!response.ok) throw new Error(`Artifact index returned HTTP ${response.status}`);
+            const record = await response.json();
+            if (record.artifacts.some(artifact => artifact.name === name)) process.exit(0);
+            await new Promise(resolve => setTimeout(resolve, 1000));
+          }
+          throw new Error('The uploaded artifact did not appear in its run index');
+          JS
+      - name: Download artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: standard-${{ github.run_id }}
+          path: downloaded
+          github-token: ${{ github.token }}
+      - name: Save cache
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: standard-fixture/cache
+          key: standard-${{ github.run_id }}-${{ hashFiles('standard-fixture/payload.txt') }}
+      # Delete local bytes so only a real cache restore can satisfy the comparison.
+      - name: Remove local cache payload
+        run: rm -rf standard-fixture/cache
+      - name: Restore cache
+        id: restored
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: standard-fixture/cache
+          key: standard-${{ github.run_id }}-${{ hashFiles('standard-fixture/payload.txt') }}
+          fail-on-cache-miss: true
+      - name: Deliberately skipped
+        if: 'false'
+        run: printf 'SHOULD-NOT-EXECUTE %s\n' "$GITHUB_RUN_ID"
+      # Compute the expected hash independently and compare the downloaded bytes.
+      - name: Verify round trips
+        if: always()
+        env:
+          CACHE_HIT: ${{ steps.restored.outputs.cache-hit }}
+          CONTENT_HASH: ${{ hashFiles('standard-fixture/payload.txt') }}
+        run: |
+          test "$CACHE_HIT" = true
+          node -e 'const c=require("node:crypto"),f=require("node:fs"),a=require("node:assert/strict");a.equal(process.env.CONTENT_HASH,c.createHash("sha256").update(c.createHash("sha256").update(f.readFileSync("standard-fixture/payload.txt")).digest()).digest("hex"))'
+          cmp standard-fixture/payload.txt downloaded/payload.txt
+          cmp standard-fixture/payload.txt standard-fixture/cache/value.txt
+          printf 'API-STANDARD-PASS %s\n' "$GITHUB_RUN_ID"
+  consumer:
+    needs: standard
+    runs-on: ${{ inputs.allow_hosted && inputs.pool_label || fromJSON(format('["self-hosted","{0}"]', inputs.pool_label)) }}
+    env:
+      PAYLOAD: ${{ needs.standard.outputs.payload }}
+    steps:
+      - name: Verify job output
+        run: |
+          test "$PAYLOAD" = "standard-$GITHUB_RUN_ID"
+          printf 'API-STANDARD-CONSUMER-PASS %s\n' "$GITHUB_RUN_ID"
+  # Require managed Python and an activated environment, not the host interpreter.
+  python:
+    runs-on: ${{ inputs.allow_hosted && inputs.pool_label || fromJSON(format('["self-hosted","{0}"]', inputs.pool_label)) }}
+    timeout-minutes: 5
+    steps:
+      - name: Set up uv
+        uses: astral-sh/setup-uv@ae62891fec2bb8e7d6c99fc78c9fec3a63790f8d
+        env:
+          UV_PYTHON_INSTALL_DIR: ${{ runner.tool_cache }}/uv-python
+          UV_PYTHON_PREFERENCE: only-managed
+        with:
+          version: '0.12.13'
+          python-version: '3.13'
+          activate-environment: true
+          no-project: true
+          enable-cache: false
+          cache-local-path: ${{ runner.tool_cache }}/uv-cache
+          ignore-empty-workdir: true
+          quiet: true
+      - name: Verify selected Python
+        env:
+          UV_PYTHON_INSTALL_DIR: ${{ runner.tool_cache }}/uv-python
+        run: |
+          python -c 'import os,sys; from pathlib import Path; assert sys.version_info[:2] == (3, 13); assert sys.prefix != sys.base_prefix; assert Path(sys.base_prefix).resolve().is_relative_to(Path(os.environ["UV_PYTHON_INSTALL_DIR"]).resolve())'
+          printf 'API-STANDARD-PYTHON-PASS %s\n' "$GITHUB_RUN_ID"

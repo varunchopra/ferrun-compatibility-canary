@@ -1,0 +1,26 @@
+# Copyright (c) 2026 Ferrun contributors. All rights reserved.
+#
+# Responsibility: Verify input and output context across a nested composite action.
+# Connections: semantics.yml invokes this local action on both runner implementations
+# during live qualification.
+
+name: Context probe # Exercise local composites without another external tool.
+description: Echo an input through a nested step output # Describe the actual context boundary being checked.
+inputs: # Accept a caller-produced value.
+  value: # Keep the input name stable for the standard workflow.
+    description: Run-correlated value to echo # Require meaningful data rather than unconditional success.
+    required: true # Make the expected action input explicit.
+outputs: # Publish data from the nested step.
+  echoed: # Give the caller a stable output name.
+    description: Value emitted by the nested command # Identify the producer of this output.
+    value: ${{ steps.emit.outputs.echoed }} # Evaluate after the nested step completes.
+runs: # Use the standard composite runtime.
+  using: composite # Exercise application-owned nested step execution.
+  steps: # Keep the fixture to one output-producing command.
+    - id: emit # Provide the local context referenced by the manifest output.
+      shell: bash # Composite run steps declare their interpreter.
+      env: # Pass input as data.
+        VALUE: ${{ inputs.value }} # Read the caller's evaluated input.
+      run: | # Verify inherited scope before producing the nested output.
+        test "$COMPOSITE_ENV" = inherited # Require the caller's composite environment to reach this nested command.
+        printf 'echoed=%s\n' "$VALUE" >> "$GITHUB_OUTPUT" # Produce a real file-command output.

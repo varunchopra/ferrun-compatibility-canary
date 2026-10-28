@@ -1,0 +1,13 @@
+# Copyright (c) 2026 Ferrun contributors. All rights reserved.
+#
+# Responsibility: Verify the configured action interpreter in main and post phases.
+# Connections: standard.yml invokes index.js through this local action independently
+# of the project's selected Node runtime.
+
+name: Action runtime probe # Verify action Node independently of the project's selected Node version.
+description: Check Node runtime identity in main and post # Exercise both invocation paths through a real local action manifest.
+runs: # Let each runner select its own implementation of the declared action runtime.
+  using: node24 # The workflow intentionally selects a different Node version for shell commands.
+  main: index.js # Run the same small assertion without external JavaScript dependencies.
+  post: index.js # A later PATH change must not redirect the action's cleanup interpreter.
+  post-if: always() # Preserve the runtime-identity check after ordinary job failures too.

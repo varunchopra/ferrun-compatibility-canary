@@ -1,0 +1,44 @@
+# Copyright (c) 2026 Ferrun contributors. All rights reserved.
+#
+# Responsibility: Exercise workflow commands, problem matchers, and continued
+# composite failures.
+# Connections: semantics.yml consumes this action and reporting_contract.py compares
+# the resulting issues and step state.
+
+name: Reporting protocol probe # Exercise command interpretation and matcher-generated diagnostics through real composite execution.
+description: Verify rendered commands and continued child failure # Keep the fixture focused on the reviewed reporting differences.
+runs: # Define the action consumed from the immutable workflow checkout.
+  using: composite # Make child boundaries and shared parent-log attribution observable.
+  steps: # Keep output short while checking distinct protocol effects.
+    - id: commands # Give diagnostic rendering a stable embedded context.
+      name: Reporting commands # Correlate matcher and stop-command assertions with one child.
+      shell: bash # Composite scripts cannot inherit the caller's shell default.
+      run:
+        | # Emit actual workflow commands instead of forging runner-side observations.
+        printf 'one\ntwo\nthree\n' > reporting-probe.txt # Give the compiler annotation a real source file and known coordinates.
+        printf '::group::Reporting command probe\n' # Require conversion to GitHub's rendered group syntax.
+        printf '##[add-matcher]%s/matcher.json\n' "$GITHUB_ACTION_PATH" # Exercise the legacy registration framing emitted by standard actions.
+        printf 'reporting-probe.txt:2:3: warning: EXPECTED_MATCHER_%s\n' "$GITHUB_RUN_ID" # Require a real matcher annotation without changing process success.
+        printf '::remove-matcher owner=controlled-canary::\n' # Remove only this fixture's owner before the next matching-shaped line.
+        printf 'reporting-probe.txt:2:3: error: REMOVED_MATCHER_%s\n' "$GITHUB_RUN_ID" # This must remain ordinary output after removal.
+        secret="CANARY_MASK_$GITHUB_RUN_ID" # Form the controlled secret at runtime so echoed script source cannot reveal its expanded value.
+        printf '::add-mask::%s\n' "$secret" # Register masking before any following output contains the value.
+        printf '::stop-commands::controlled-canary-stop\n' # Suspend interpretation without suspending secret masking.
+        printf '::error::LITERAL_COMMAND_%s\n' "$GITHUB_RUN_ID" # Require literal output with no new annotation while commands are stopped.
+        printf 'MASKED_VALUE:%s\n' "$secret" # Persist only the redacted value even while command interpretation is disabled.
+        printf '::controlled-canary-stop::\n' # Restore interpretation through the exact selected resume token.
+        printf '::endgroup::\n' # Close the rendered group after command processing resumes.
+    - id: continued # Preserve raw failure separately from the composite child's adjusted conclusion.
+      name: Continued composite child # Give the end marker a meaningful stable display name.
+      shell: bash # Select the same interpreter contract on both platforms.
+      continue-on-error: true # Keep the parent successful while retaining failure diagnostics.
+      run: exit 9 # Produce one controlled child failure without verbose output.
+    - id: verify # Require normal continuation after the adjusted child result.
+      name: Verify composite continuation # A marker alone must not qualify a skipped assertion.
+      shell: bash # Keep shell evaluation independent from caller defaults.
+      env: # Supply expression results as data instead of interpolating executable code.
+        RAW: ${{ steps.continued.outcome }} # The child's actual failure must remain visible.
+        ADJUSTED: ${{ steps.continued.conclusion }} # The configured conclusion must permit continuation.
+      run: | # Print evidence only after both result semantics hold.
+        test "$RAW" = failure && test "$ADJUSTED" = success # Distinguish execution outcome from continue-on-error policy.
+        printf 'API-REPORTING-PASS %s\n' "$GITHUB_RUN_ID" # Bind the verified child behavior to this GitHub run.

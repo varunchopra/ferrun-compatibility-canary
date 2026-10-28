@@ -1,0 +1,16 @@
+# Copyright (c) 2026 Ferrun contributors. All rights reserved.
+#
+# Responsibility: Exercise bounded child summaries whose combined size exceeds the
+# step limit.
+# Connections: Live reporting qualification checks the resulting GitHub summary
+# rejection against official runner behavior.
+
+name: Aggregate summary probe # Exercise multiple admitted summary events under one composite reporting step.
+description: Write bounded summaries from two nested commands # Each file fits the per-invocation limit while their combined size exceeds one MiB.
+runs: # Keep file production inside the real composite execution path.
+  using: composite # Require the runner to handle optional reporting across nested commands.
+  steps: # Two small invocations reproduce the controller's aggregate-size rejection boundary.
+    - shell: bash # Composite commands explicitly declare their shell.
+      run: line=$(printf '%1023s' ' '); line=${line// /a}; for ((index=0; index<600; index++)); do printf '%s\n' "$line"; done > "$GITHUB_STEP_SUMMARY" # Preserve the independently hashed 600 KiB of ordinary bounded Markdown lines using Bash builtins, without an undeclared Python prerequisite.
+    - shell: bash # Keep the second invocation independent of the first command file.
+      run: line=$(printf '%1023s' ' '); line=${line// /b}; for ((index=0; index<600; index++)); do printf '%s\n' "$line"; done > "$GITHUB_STEP_SUMMARY" # Keep the second independently hashed 600 KiB attachment distinct while the combined 1200 KiB challenges aggregate upload rejection.

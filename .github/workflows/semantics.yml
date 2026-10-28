@@ -1,0 +1,266 @@
+# Copyright (c) 2026 Ferrun contributors. All rights reserved.
+#
+# Responsibility: Exercise job-local conditions, environment scope, composites, and
+# cleanup.
+# Connections: live-canary.py compares the same action fixtures on Ferrun and the
+# official GitHub runner.
+
+# Compare runtime behavior against the official runner using the same fixtures.
+name: Runner semantic regressions
+run-name: api-probe-${{ inputs.probe_id }}
+on:
+  workflow_dispatch:
+    inputs:
+      # Manual probes stay self-hosted; release qualification opts into hosted references.
+      allow_hosted:
+        type: boolean
+        default: false
+        required: false
+      case:
+        type: choice
+        options: [semantics, step_timeout, cancellation_cleanup, summary_limits]
+        required: true
+      # GitHub evaluates workflow PATH before runner context is available.
+      runner_os:
+        type: choice
+        options: [Linux, macOS, Windows]
+        default: Linux
+      pool_label:
+        type: string
+        required: true
+      probe_id:
+        type: string
+        required: true
+permissions:
+  contents: read
+env:
+  PATH: ${{ inputs.runner_os == 'Windows' && 'C:\workflow-path;C:\Windows\system32;C:\Program Files\Git\cmd;C:\Program Files\Git\usr\bin' || '/workflow-path:/usr/bin:/bin' }}
+jobs:
+  workflow_path:
+    if: inputs.case == 'semantics'
+    runs-on: ${{ inputs.allow_hosted && inputs.pool_label || fromJSON(format('["self-hosted","{0}"]', inputs.pool_label)) }}
+    steps:
+      - name: Verify workflow PATH
+        if: runner.os != 'Windows'
+        shell: bash
+        run: test "$PATH" = /workflow-path:/usr/bin:/bin
+      - name: Verify Windows workflow PATH
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: if ($env:Path -ne ($PSHOME + ';C:\workflow-path;C:\Windows\system32;C:\Program Files\Git\cmd;C:\Program Files\Git\usr\bin')) { throw 'workflow PATH was replaced' }
+  # Workflow working-directory defaults must not enter composite action steps.
+  scope_defaults:
+    if: inputs.case == 'semantics'
+    runs-on: ${{ inputs.allow_hosted && inputs.pool_label || fromJSON(format('["self-hosted","{0}"]', inputs.pool_label)) }}
+    defaults:
+      run:
+        working-directory: project
+        shell: bash
+    steps:
+      - name: Checkout directory fixture
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Prepare caller directory
+        working-directory: ${{ github.workspace }}
+        run: mkdir -p project
+      - name: Verify caller default
+        run: test "$PWD" -ef "$GITHUB_WORKSPACE/project"
+      - name: Verify embedded defaults
+        uses: ./.github/actions/directory-probe
+      - name: Confirm directory scopes
+        run: printf 'API-COMPOSITE-DEFAULTS-PASS %s\n' "$GITHUB_RUN_ID"
+  semantics:
+    if: inputs.case == 'semantics'
+    runs-on: ${{ inputs.allow_hosted && inputs.pool_label || fromJSON(format('["self-hosted","{0}"]', inputs.pool_label)) }}
+    timeout-minutes: 5
+    env:
+      PATH: ${{ inputs.runner_os == 'Windows' && 'C:\job-path;C:\Windows\system32;C:\Program Files\Git\cmd;C:\Program Files\Git\usr\bin' || '/job-path:/usr/bin:/bin' }}
+    steps:
+      - name: Verify job PATH
+        if: runner.os != 'Windows'
+        shell: bash
+        run: test "$PATH" = /job-path:/usr/bin:/bin
+      - name: Verify Windows job PATH
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: if ($env:Path -ne ($PSHOME + ';C:\job-path;C:\Windows\system32;C:\Program Files\Git\cmd;C:\Program Files\Git\usr\bin')) { throw 'job PATH was replaced' }
+      - name: Checkout fixtures
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      # Project Node deliberately differs from the action Node runtime.
+      - name: Select project Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: '22.14.0'
+          package-manager-cache: false
+      - name: Verify project Node
+        shell: bash
+        run: node -e 'require("node:assert/strict").equal(process.versions.node, "22.14.0")'
+      - name: Probe action Node
+        uses: ./.github/actions/node-probe
+      - name: Write PATH commands
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          printf 'PATH=/file-path:/usr/bin:/bin\n' >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/probe-bin"
+          printf '%s\n' "$RUNNER_TEMP/probe-bin" >> "$GITHUB_PATH"
+      - name: Write Windows PATH commands
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          [IO.File]::AppendAllText($env:GITHUB_ENV, "Path=C:\file-path;C:\Windows\system32;C:\Program Files\Git\cmd;C:\Program Files\Git\usr\bin`n")
+          $directory = Join-Path $env:RUNNER_TEMP 'probe-bin'; [IO.Directory]::CreateDirectory($directory) | Out-Null
+          [IO.File]::AppendAllText($env:GITHUB_PATH, "$directory`n")
+      - name: Verify step PATH
+        if: runner.os != 'Windows'
+        env:
+          PATH: /step-path:/usr/bin:/bin
+        shell: bash
+        run: case "$PATH" in "$RUNNER_TEMP/probe-bin":*"/step-path:/usr/bin:/bin") ;; *) exit 1 ;; esac
+      - name: Verify file PATH
+        if: runner.os != 'Windows'
+        shell: bash
+        run: case "$PATH" in "$RUNNER_TEMP/probe-bin":*"/file-path:/usr/bin:/bin") ;; *) exit 1 ;; esac
+      - name: Verify Windows step PATH
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          PATH: C:\step-path;C:\Windows\system32;C:\Program Files\Git\cmd;C:\Program Files\Git\usr\bin
+        run: if (-not $env:Path.StartsWith($PSHOME + ';' + (Join-Path $env:RUNNER_TEMP 'probe-bin') + ';') -or -not $env:Path.EndsWith('C:\step-path;C:\Windows\system32;C:\Program Files\Git\cmd;C:\Program Files\Git\usr\bin')) { throw 'step PATH precedence or prepend was lost' }
+      - name: Verify Windows file PATH
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: if (-not $env:Path.StartsWith($PSHOME + ';' + (Join-Path $env:RUNNER_TEMP 'probe-bin') + ';') -or -not $env:Path.EndsWith('C:\file-path;C:\Windows\system32;C:\Program Files\Git\cmd;C:\Program Files\Git\usr\bin')) { throw 'file PATH did not survive step scope' }
+      # Omitted shells and explicit Bash must preserve their different failure behavior.
+      - name: Omitted shell
+        id: omitted
+        run: ${{ runner.os == 'Windows' && 'if (-not $PSVersionTable) { exit 1 }; Write-Output native-default' || 'false | true' }}
+      - name: Explicit Bash
+        id: explicit
+        shell: bash
+        continue-on-error: true
+        run: false | true
+      - name: Emit error annotation
+        id: annotated
+        shell: bash
+        run: printf '%s\n' '::error title=Semantic canary::EXPECTED_CANARY_ANNOTATION'
+      - name: Create hash fixture
+        shell: bash
+        run: |
+          mkdir -p semantics-fixture/patches/nested
+          printf 'probe\n' > semantics-fixture/patches/nested/probe.txt
+          printf 'excluded\n' > semantics-fixture/patches/nested/skip.txt
+          printf 'probe\n' > "$RUNNER_TEMP/hash-outside.txt"
+          ln -s "$RUNNER_TEMP/hash-outside.txt" semantics-fixture/link.txt
+          printf 'A\n' > semantics-fixture/order-a.txt
+          printf 'B\n' > semantics-fixture/order-b.txt
+      - name: Verify semantics
+        if: always()
+        env:
+          OMITTED: ${{ steps.omitted.outcome }}
+          EXPLICIT: ${{ steps.explicit.outcome }}
+          ANNOTATED: ${{ steps.annotated.outcome }}
+          HASH: ${{ hashFiles('semantics-fixture/patches/**', '!semantics-fixture/patches/**/skip.txt') }}
+          ABSOLUTE_HASH: ${{ hashFiles(format('{0}/semantics-fixture/patches/nested/probe.txt', github.workspace)) }}
+          OUTSIDE_HASH: ${{ hashFiles(format('{0}/hash-outside.txt', runner.temp)) }}
+          LINK_HASH: ${{ hashFiles('semantics-fixture/link.txt') }}
+          ORDER_AB: ${{ hashFiles('semantics-fixture/order-a.txt', 'semantics-fixture/order-b.txt') }}
+          ORDER_BA: ${{ hashFiles('semantics-fixture/order-b.txt', 'semantics-fixture/order-a.txt') }}
+          EMPTY_HASH: ${{ hashFiles('semantics-fixture/patches/**', '!semantics-fixture/patches/**') }}
+        shell: bash
+        run: |
+          test "$OMITTED" = success && test "$EXPLICIT" = failure && test "$ANNOTATED" = success
+          # These digests come from independent reference observations, not Ferrun output.
+          test "$HASH" = b8306b5a175b4462187c95ac0fd64831dabca27def9ba754afb2f0ad3b05a8ea
+          test "$ABSOLUTE_HASH" = "$HASH" && test "$LINK_HASH" = "$HASH" && test -z "$OUTSIDE_HASH"
+          test "$ORDER_AB" = 7f465059e4ab7f694cfbd3f1a22b31a57c8d1b86786446a2fdb5ed93eef43562
+          test "$ORDER_BA" = 1e7046b7ce5ea5f1ffec14f615b1ca2c2592c533610603daa30988362b83f56d
+          test -z "$EMPTY_HASH"
+          printf 'API-SEMANTICS-PASS %s\n' "$GITHUB_RUN_ID"
+  # A step timeout is a failure; it must not mark the workflow cancelled.
+  step_timeout:
+    if: inputs.case == 'step_timeout'
+    runs-on: ${{ inputs.allow_hosted && inputs.pool_label || fromJSON(format('["self-hosted","{0}"]', inputs.pool_label)) }}
+    timeout-minutes: 3
+    steps:
+      - name: Expected step timeout
+        id: timed
+        timeout-minutes: 1
+        shell: bash
+        run: sleep 90
+      - name: Verify timeout failure
+        if: failure() && !cancelled()
+        env:
+          RESULT: ${{ steps.timed.outcome }}
+        shell: bash
+        run: test "$RESULT" = failure && printf 'API-TIMEOUT-PASS %s\n' "$GITHUB_RUN_ID"
+  timeout_continued:
+    if: inputs.case == 'step_timeout'
+    runs-on: ${{ inputs.allow_hosted && inputs.pool_label || fromJSON(format('["self-hosted","{0}"]', inputs.pool_label)) }}
+    timeout-minutes: 3
+    steps:
+      - name: Continued step timeout
+        id: timed
+        timeout-minutes: 1
+        continue-on-error: true
+        shell: bash
+        run: sleep 90
+      - name: Verify continued timeout
+        env:
+          RAW: ${{ steps.timed.outcome }}
+          ADJUSTED: ${{ steps.timed.conclusion }}
+        shell: bash
+        run: test "$RAW" = failure && test "$ADJUSTED" = success && printf 'API-TIMEOUT-CONTINUED-PASS %s\n' "$GITHUB_RUN_ID"
+  # Running always() cleanup must finish while later ordinary steps remain suppressed.
+  cancellation_cleanup:
+    if: inputs.case == 'cancellation_cleanup'
+    runs-on: ${{ inputs.allow_hosted && inputs.pool_label || fromJSON(format('["self-hosted","{0}"]', inputs.pool_label)) }}
+    timeout-minutes: 3
+    steps:
+      - name: Cleanup running during cancellation
+        if: always()
+        shell: bash
+        run: |
+          printf 'API-CLEANUP-START %s\n' "$GITHUB_RUN_ID"
+          sleep 120
+          printf 'API-CLEANUP-PASS %s\n' "$GITHUB_RUN_ID"
+      - name: Verify cancelled context
+        if: cancelled()
+        shell: bash
+        run: printf 'CANCELLED_CONTEXT_PASS %s\n' "$GITHUB_RUN_ID"
+      - name: Suppress ordinary continuation
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: printf 'SHOULD-NOT-EXECUTE %s\n' "$GITHUB_RUN_ID"
+  # Optional summary rejection must allow job completion and the next assignment.
+  summary_limits:
+    if: inputs.case == 'summary_limits'
+    runs-on: ${{ inputs.allow_hosted && inputs.pool_label || fromJSON(format('["self-hosted","{0}"]', inputs.pool_label)) }}
+    timeout-minutes: 3
+    steps:
+      - name: Checkout summary fixture
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Oversized summary
+        shell: bash
+        run: printf '%1048577s' x > "$GITHUB_STEP_SUMMARY"
+      - name: Aggregate summaries
+        uses: ./.github/actions/summary-probe
+      - name: Continue after summary rejection
+        shell: bash
+        run: printf 'small valid summary\n' >> "$GITHUB_STEP_SUMMARY"; printf 'API-SUMMARY-PASS %s\n' "$GITHUB_RUN_ID"
+  summary_consumer:
+    if: inputs.case == 'summary_limits'
+    needs: summary_limits
+    runs-on: ${{ inputs.allow_hosted && inputs.pool_label || fromJSON(format('["self-hosted","{0}"]', inputs.pool_label)) }}
+    steps:
+      - name: Verify subsequent assignment
+        shell: bash
+        run: printf 'API-SUMMARY-CONSUMER-PASS %s\n' "$GITHUB_RUN_ID"
