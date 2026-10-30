@@ -8,7 +8,7 @@ reporting_contract.py compares the resulting diagnostic events.
 
 # Controlled matcher fixture
 
-This is a small test input for the runner's real matcher registry. The independent Rust tests also consume the exact pinned checkout and setup-node configurations.
+This input tests the runner's matcher registry. Independent Rust tests also consume the pinned checkout and setup-node configurations.
 
 | JSON pointer                           | Explanation                                                            |
 | -------------------------------------- | ---------------------------------------------------------------------- |
